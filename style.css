@@ -140,7 +140,9 @@ label small { font-size: 11px; color: var(--text-dim); }
 .bubble.gone { background: transparent; color: var(--text-dim); border: 1px dashed var(--line); }
 .bubble.gone .txt { font-style: italic; opacity: .75; }
 
-.bubble .t   { display: block; font-size: 10px; opacity: .6; margin-top: 4px; text-align: start; }
+.bubble .txt { display: block; }
+.bubble .t   { display: block; font-size: 10px; opacity: .6; margin-top: 5px;
+               text-align: start; line-height: 1.2; }
 
 /* per-message actions, shown on tap.
    pointer-events must be off while collapsed: overflow:hidden keeps the buttons
