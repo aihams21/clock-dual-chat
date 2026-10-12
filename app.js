@@ -421,16 +421,16 @@ function attachActions(b, key, m, mine) {
   if (mine) {
     const e = document.createElement("button");
     e.type = "button"; e.textContent = "✏️ تعديل"; e.title = "تعديل";
-    e.onclick = (ev) => { ev.stopPropagation(); startEdit(key, m.body); };
+    e.onclick = (ev) => { ev.stopPropagation(); startEdit(key, m.body, b); };
     const d = document.createElement("button");
     d.type = "button"; d.textContent = "🗑 حذف"; d.title = "حذف";
     d.className = "danger";
-    d.onclick = (ev) => { ev.stopPropagation(); confirmDelete(key); };
+    d.onclick = (ev) => { ev.stopPropagation(); confirmDelete(key, b); };
     bar.append(e, d);
   }
 
   b.appendChild(bar);
-  b.addEventListener("dblclick", () => mine && startEdit(key, m.body));
+  b.addEventListener("dblclick", () => mine && startEdit(key, m.body, b));
 }
 
 // tap a bubble to reveal its actions (touch-friendly; no hover on phones)
@@ -438,10 +438,18 @@ $("thread").addEventListener("click", (ev) => {
   if (ev.target.closest(".acts")) return;
   const b = ev.target.closest(".bubble");
   if (!b || b.classList.contains("gone")) return;
+  toggleActions(b);
+});
+
+function toggleActions(b) {
   const wasOpen = b.classList.contains("open");
   $("thread").querySelectorAll(".bubble.open").forEach((x) => x.classList.remove("open"));
   if (!wasOpen) b.classList.add("open");
-});
+}
+
+function closeActions(b) {
+  if (b) b.classList.remove("open");
+}
 
 function scrollDown() {
   const th = $("thread");
@@ -470,7 +478,8 @@ function watchInbox() {
 }
 
 /* ---------------- edit ---------------- */
-function startEdit(key, body) {
+function startEdit(key, body, fromNode) {
+  closeActions(fromNode);
   editingKey = key;
   const box = $("msg");
   box.value = body;
@@ -496,8 +505,8 @@ $("cancel-edit").onclick = () => {
   $("msg").value = "";
 };
 
-async function confirmDelete(key) {
-  const b = $("thread").querySelector(`[data-id="${key}"]`);
+async function confirmDelete(key, node) {
+  const b = node || $("thread").querySelector(`[data-id="${key}"]`);
   if (b && !confirm("تحذف الرسالة؟ ما بنقدر نرجّعها")) return;
   try {
     await db.ref(`${ROOT}/conversations/${convoKey(me.uid, peer.uid)}/messages/${key}`)

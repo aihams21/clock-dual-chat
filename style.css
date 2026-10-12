@@ -142,14 +142,16 @@ label small { font-size: 11px; color: var(--text-dim); }
 
 .bubble .t   { display: block; font-size: 10px; opacity: .6; margin-top: 4px; text-align: start; }
 
-/* per-message actions, shown on tap */
+/* per-message actions, shown on tap.
+   pointer-events must be off while collapsed: overflow:hidden keeps the buttons
+   laid out, so without this a clipped button still swallows taps. */
 .acts {
   display: flex; gap: 6px; margin-top: 6px;
   justify-content: flex-start;
-  max-height: 0; overflow: hidden; opacity: 0;
+  max-height: 0; overflow: hidden; opacity: 0; pointer-events: none;
   transition: max-height .18s ease, opacity .18s ease;
 }
-.bubble.open .acts { max-height: 44px; opacity: 1; }
+.bubble.open .acts { max-height: 44px; opacity: 1; pointer-events: auto; }
 .acts button {
   border: 0; border-radius: 9px; cursor: pointer;
   background: rgba(255,255,255,.14); color: inherit;
