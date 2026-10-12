@@ -1,5 +1,11 @@
 /* Clock Dual - chat app (Firebase Realtime Database)
-   Everything lives under /clockdual so it never touches other app data. */
+   Everything lives under /clockdual so it never touches other app data.
+
+   Message lifecycle, enforced by database.rules.json:
+     send    -> create, senderId = me
+     edit    -> body only, sender only, not on a tombstone
+     delete  -> soft (deleted:true, body dropped), sender only, ONE-WAY
+   The other side sees edits and deletions instantly via child_changed. */
 
 const CFG = window.CONFIG || {};
 if (!CFG.apiKey || !CFG.databaseURL) {
@@ -25,9 +31,14 @@ let peer = null;
 let unsubMessages = null;
 let unsubInbox = null;
 let sending = false;
+let editingKey = null; // message id currently open in the editor
 
 /* ---------------- helpers ---------------- */
 const convoKey = (a, b) => [a, b].sort().join("__");
+const esc = (s) =>
+  String(s).replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])
+  );
 
 function friendly(e) {
   const m = String(e?.message || e);
@@ -35,9 +46,9 @@ function friendly(e) {
     return "الإيميل أو كلمة السر غلط";
   if (/auth\/email-already-in-use/i.test(m)) return "هذا الإيميل مسجّل قبل";
   if (/auth\/weak-password/i.test(m)) return "كلمة السر ضعيفة (6 أحرف على الأقل)";
-  if (/auth\/username.*taken|already exists/i.test(m)) return "اسم المستخدم محجوز";
-  if (/PERMISSION_DENIED/i.test(m)) return "الصلاحية مرفوضة";
-  if (/Failed to fetch|NetworkError|network/i.test(m)) return "ما في نت";
+  if (/PERMISSION_DENIED/i.test(m)) return "ما عندك صلاحية";
+  if (/MAX_RULES|too many|depth exceeded/i.test(m)) return "قاعدة البيانات ممتلئة";
+  if (/Failed to fetch|NetworkError|network/i.test(m)) return "ما في نت — تأكد من الاتصال";
   return m;
 }
 
@@ -62,6 +73,10 @@ function avatarFor(el, p) {
   }
 }
 
+function hhmm(ts) {
+  return new Date(ts).toLocaleTimeString("ar", { hour: "2-digit", minute: "2-digit" });
+}
+
 /* ---------------- auth ---------------- */
 let isRegister = false;
 
@@ -83,8 +98,12 @@ $("auth-form").onsubmit = async (ev) => {
   err.textContent = "";
 
   const username = $("username").value.trim().toLowerCase();
-  if (isRegister && username.length < 2) {
-    err.textContent = "اسم المستخدم لازم حرفين على الأقل";
+  if (isRegister && !/^[a-z0-9_.\-]{2,24}$/.test(username)) {
+    err.textContent = "اسم المستخدم: حروف إنجليزية وأرقام فقط، من 2 إلى 24";
+    return;
+  }
+  if (password.length < 6) {
+    err.textContent = "كلمة السر لازم 6 أحرف على الأقل";
     return;
   }
 
@@ -96,7 +115,6 @@ $("auth-form").onsubmit = async (ev) => {
     if (isRegister) {
       const cred = await auth.createUserWithEmailAndPassword(email, password);
       const displayName = $("displayname").value.trim() || username;
-      // claim the username index BEFORE anything else can
       const claimed = await db.ref(`${ROOT}/usernames/${username}`).transaction((cur) =>
         cur === null ? cred.user.uid : undefined
       );
@@ -129,7 +147,11 @@ auth.onAuthStateChanged(async (user) => {
   try {
     const snap = await db.ref(`${ROOT}/profiles/${user.uid}`).get();
     me = snap.exists() ? { uid: user.uid, ...snap.val() } : null;
-    if (!me) return show("auth");
+    if (!me) {
+      toast("ما لقينا بروفايلك — جرّب تسجّل من جديد");
+      await auth.signOut();
+      return;
+    }
     $("me-name").textContent = me.displayName || me.username;
     $("me-username").textContent = me.username;
     avatarFor($("me-avatar"), me);
@@ -161,7 +183,6 @@ $("q").oninput = (ev) => {
 async function runSearch(q) {
   const list = $("results");
   try {
-    // prefix search on the username index: startAt(q) .. endAt(q + high char)
     const snap = await db
       .ref(`${ROOT}/usernames`)
       .orderByKey()
@@ -170,22 +191,18 @@ async function runSearch(q) {
       .limitToFirst(30)
       .get();
 
-    const uids = Object.values(snap.val() || {}).filter((u) => u !== me.uid);
+    const uids = [...new Set(Object.values(snap.val() || {}))].filter((u) => u !== me.uid);
     if (!uids.length) {
       list.innerHTML = "";
       $("search-hint").textContent = "ما لقينا حدا";
       return;
     }
 
-    const profs = await Promise.all(
-      uids.map((u) => db.ref(`${ROOT}/profiles/${u}`).get())
-    );
+    const profs = await Promise.all(uids.map((u) => db.ref(`${ROOT}/profiles/${u}`).get()));
     const people = profs
       .filter((s) => s.exists())
       .map((s) => ({ uid: s.key, ...s.val() }))
-      .filter((p) =>
-        p.username.startsWith(q) || (p.displayName || "").toLowerCase().includes(q)
-      )
+      .filter((p) => p.username.startsWith(q) || (p.displayName || "").toLowerCase().includes(q))
       .slice(0, 30);
 
     list.innerHTML = "";
@@ -224,7 +241,9 @@ async function openByUsername(username) {
 /* ---------------- chat ---------------- */
 function teardown() {
   if (unsubMessages) { unsubMessages(); unsubMessages = null; }
-  if (unsubInbox)    { unsubInbox();    unsubInbox = null; }
+  if (unsubInbox) { unsubInbox(); unsubInbox = null; }
+  editingKey = null;
+  exitEditMode();
 }
 
 $("back").onclick = () => {
@@ -245,7 +264,6 @@ async function openChat(p) {
   history.replaceState(null, "", "#/u/" + p.username);
 
   const key = convoKey(me.uid, p.uid);
-  // each side stamps its own flag -> unlocks .read for this conversation
   try {
     await db.ref(`${ROOT}/conversations/${key}/meta/${me.uid}`).set(true);
   } catch (e) { return toast(friendly(e)); }
@@ -264,7 +282,7 @@ async function openChat(p) {
       e.textContent = "ابدأ المحادثة 👋";
       $("thread").appendChild(e);
     } else {
-      Object.values(snap.val()).forEach((m) => appendBubble(m, m.key, true));
+      Object.entries(snap.val()).forEach(([k, m]) => renderBubble(k, m, true));
     }
     scrollDown();
   } catch (e) { toast(friendly(e)); }
@@ -274,30 +292,99 @@ async function openChat(p) {
     .orderByChild("createdAt")
     .limitToLast(200)
     .on("child_added", (s) => {
-      if ($("thread").querySelector(`[data-id="${s.key}"]`)) return;
-      appendBubble(s.val(), s.key);
+      if (s.key === "__loading__") return;
+      renderBubble(s.key, s.val());
+    })
+    .on("child_changed", (s) => {
+      const m = s.val();
+      const node = $("thread").querySelector(`[data-id="${s.key}"]`);
+      const wasDeleted = node?.dataset.deleted === "1";
+      const isDeleted = m.deleted === true;
+
+      if (isDeleted && !wasDeleted) {
+        toast("🗑 تم حذف رسالة");
+        renderBubble(s.key, m);
+      } else if (wasDeleted && !isDeleted) {
+        renderBubble(s.key, m);
+      } else {
+        updateBubbleText(s.key, m);
+      }
     });
 }
 
-function appendBubble(m, key, quiet) {
+/* --------- rendering --------- */
+function renderBubble(key, m, quiet) {
   const empty = $("thread").querySelector(".empty");
   if (empty) empty.remove();
 
   const mine = m.senderId === me.uid;
   const b = document.createElement("div");
-  b.className = "bubble " + (mine ? "me" : "you");
+  b.className = "bubble " + (mine ? "me" : "you") + (m.deleted ? " gone" : "");
   b.dataset.id = key;
-  b.textContent = m.body;
+  if (m.deleted) b.dataset.deleted = "1";
 
-  const t = document.createElement("span");
-  t.className = "t";
-  t.textContent = new Date(m.createdAt).toLocaleTimeString("ar", {
-    hour: "2-digit", minute: "2-digit",
-  });
-  b.appendChild(t);
-  $("thread").appendChild(b);
+  const txt = document.createElement("span");
+  txt.className = "txt";
+  txt.textContent = m.deleted ? "تم حذف الرسالة" : m.body;
+  b.appendChild(txt);
+
+  const meta = document.createElement("span");
+  meta.className = "t";
+  const bits = [hhmm(m.createdAt)];
+  if (m.editedAt) bits.push("معدّلة");
+  meta.textContent = bits.join(" · ");
+  b.appendChild(meta);
+
+  if (!m.deleted) attachActions(b, key, m, mine);
+
+  const old = $("thread").querySelector(`[data-id="${key}"]`);
+  if (old) old.replaceWith(b);
+  else $("thread").appendChild(b);
   if (!quiet) scrollDown();
 }
+
+function updateBubbleText(key, m) {
+  const b = $("thread").querySelector(`[data-id="${key}"]`);
+  if (!b) return renderBubble(key, m);
+  if (m.deleted) return renderBubble(key, m);
+  const txt = b.querySelector(".txt");
+  if (txt && txt.textContent !== m.body) txt.textContent = m.body;
+  const meta = b.querySelector(".t");
+  if (meta) {
+    const bits = [hhmm(m.createdAt)];
+    if (m.editedAt) bits.push("معدّلة");
+    meta.textContent = bits.join(" · ");
+  }
+}
+
+function attachActions(b, key, m, mine) {
+  const bar = document.createElement("span");
+  bar.className = "acts";
+
+  if (mine) {
+    const e = document.createElement("button");
+    e.type = "button"; e.textContent = "✏️ تعديل"; e.title = "تعديل";
+    e.onclick = (ev) => { ev.stopPropagation(); startEdit(key, m.body); };
+    const d = document.createElement("button");
+    d.type = "button"; d.textContent = "🗑 حذف"; d.title = "حذف";
+    d.className = "danger";
+    d.onclick = (ev) => { ev.stopPropagation(); confirmDelete(key); };
+    bar.append(e, d);
+  }
+
+  b.appendChild(bar);
+  b.addEventListener("dblclick", () => mine && startEdit(key, m.body));
+}
+
+// tap a bubble to reveal its actions (touch-friendly; no hover on phones)
+$("thread").addEventListener("click", (ev) => {
+  if (ev.target.closest(".acts")) return;
+  const b = ev.target.closest(".bubble");
+  if (!b || b.classList.contains("gone")) return;
+  const wasOpen = b.classList.contains("open");
+  $("thread").querySelectorAll(".bubble.open").forEach((x) => x.classList.remove("open"));
+  if (!wasOpen) b.classList.add("open");
+});
 
 function scrollDown() {
   const th = $("thread");
@@ -305,14 +392,60 @@ function scrollDown() {
 }
 
 function watchInbox() {
-  unsubInbox = db.ref(`${ROOT}/conversations`).on("child_added", async (snap) => {
-    const mine = await db.ref(`${ROOT}/conversations/${snap.key}/meta/${me.uid}`).get();
-    if (!mine.exists()) return;
-    snap.ref.child("messages").orderByChild("createdAt").limitToLast(1).on("value", (s) => {
-      const last = s.val() && Object.values(s.val()).pop();
-      if (last && last.senderId !== me.uid) toast(`📨 ${last.body.slice(0, 40)}`);
+  unsubInbox = db.ref(`${ROOT}/conversations`).on("child_added", (snap) => {
+    snap.ref.child("meta").child(me.uid).get().then((mine) => {
+      if (!mine.exists()) return;
+      snap.ref.child("messages").orderByChild("createdAt").limitToLast(1)
+        .on("value", (s) => {
+          const all = s.val();
+          if (!all) return;
+          const last = Object.entries(all).pop();
+          if (last && last[1].senderId !== me.uid && !last[1].deleted) {
+            const preview = last[1].body.slice(0, 40);
+            toast(`📨 ${preview}`);
+          }
+        });
     });
   });
+}
+
+/* ---------------- edit ---------------- */
+function startEdit(key, body) {
+  editingKey = key;
+  const box = $("msg");
+  box.value = body;
+  box.focus();
+  box.setSelectionRange(body.length, body.length);
+  box.style.height = "auto";
+  box.style.height = Math.min(box.scrollHeight, 120) + "px";
+  $("send").textContent = "💾 حفظ";
+  $("composer").classList.add("editing");
+  $("cancel-edit").classList.remove("hidden");
+}
+
+function exitEditMode() {
+  if (editingKey === null && !$("composer").classList.contains("editing")) return;
+  editingKey = null;
+  $("composer").classList.remove("editing");
+  $("cancel-edit").classList.add("hidden");
+  $("send").textContent = "➤";
+}
+
+$("cancel-edit").onclick = () => {
+  exitEditMode();
+  $("msg").value = "";
+};
+
+async function confirmDelete(key) {
+  const b = $("thread").querySelector(`[data-id="${key}"]`);
+  if (b && !confirm("تحذف الرسالة؟ ما بنقدر نرجّعها")) return;
+  try {
+    await db.ref(`${ROOT}/conversations/${convoKey(me.uid, peer.uid)}/messages/${key}`)
+      .update({ deleted: true, body: null });
+    toast("🗑 تم الحذف");
+  } catch (e) {
+    toast(friendly(e));
+  }
 }
 
 /* ---------------- send ---------------- */
@@ -326,24 +459,25 @@ $("composer").onsubmit = async (ev) => {
   ev.preventDefault();
   const body = msgBox.value.trim();
   if (!body || sending || !peer) return;
+  if (body.length > 4000) return toast("الرسالة طويلة (4000 حرف كحد أقصى)");
 
   sending = true;
-  msgBox.value = "";
-  msgBox.style.height = "auto";
-
-  const key = convoKey(me.uid, peer.uid);
-  const payload = {
-    senderId: me.uid,
-    body,
-    createdAt: Date.now(),
-    participants: { [me.uid]: true, [peer.uid]: true },
-  };
+  const msgRef = db.ref(`${ROOT}/conversations/${convoKey(me.uid, peer.uid)}/messages`);
 
   try {
-    const ref = db.ref(`${ROOT}/conversations/${key}/messages`).push();
-    await ref.set(payload);   // child_added listener renders it
+    if (editingKey !== null) {
+      const key = editingKey;
+      const clean = msgBox.value;
+      await msgRef.child(key).update({ body: clean, editedAt: Date.now() });
+      exitEditMode();
+      msgBox.value = "";
+      msgBox.style.height = "auto";
+    } else {
+      await msgRef.push({ senderId: me.uid, body, createdAt: Date.now() });
+      msgBox.value = "";
+      msgBox.style.height = "auto";
+    }
   } catch (e) {
-    msgBox.value = body;
     toast(friendly(e));
   } finally {
     sending = false;

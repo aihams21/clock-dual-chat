@@ -135,7 +135,33 @@ label small { font-size: 11px; color: var(--text-dim); }
 
 .bubble.me   { align-self: flex-start; background: var(--bubble-me);   color: var(--bubble-me-text); border-bottom-right-radius: 6px; }
 .bubble.you  { align-self: flex-end;   background: var(--bubble-you);  color: var(--text); border-bottom-left-radius: 6px; }
+
+/* deleted message: a tombstone both sides see */
+.bubble.gone { background: transparent; color: var(--text-dim); border: 1px dashed var(--line); }
+.bubble.gone .txt { font-style: italic; opacity: .75; }
+
 .bubble .t   { display: block; font-size: 10px; opacity: .6; margin-top: 4px; text-align: start; }
+
+/* per-message actions, shown on tap */
+.acts {
+  display: flex; gap: 6px; margin-top: 6px;
+  justify-content: flex-start;
+  max-height: 0; overflow: hidden; opacity: 0;
+  transition: max-height .18s ease, opacity .18s ease;
+}
+.bubble.open .acts { max-height: 44px; opacity: 1; }
+.acts button {
+  border: 0; border-radius: 9px; cursor: pointer;
+  background: rgba(255,255,255,.14); color: inherit;
+  font: inherit; font-size: 11.5px; padding: 5px 9px;
+}
+.bubble.me .acts button { background: rgba(0,0,0,.20); }
+.acts button.danger { color: #ff8b8b; }
+
+/* composer in edit mode */
+.composer.editing { background: #1d2531; }
+.composer.editing .btn.primary.round { background: linear-gradient(135deg, #4ea1ff, #2f7de1); }
+#cancel-edit { flex: 0 0 auto; }
 
 .empty { margin: auto; color: var(--text-dim); text-align: center; font-size: 14px; }
 
