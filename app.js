@@ -429,8 +429,10 @@ function attachActions(b, key, m, mine) {
     bar.append(e, d);
   }
 
+  // No dblclick handler on purpose: two taps in a row (open menu, then tap a
+  // button) register as a dblclick and would flip the menu back open/closed.
+  // Tap-to-reveal is the only gesture, which is what works on a touch screen.
   b.appendChild(bar);
-  b.addEventListener("dblclick", () => mine && startEdit(key, m.body, b));
 }
 
 // tap a bubble to reveal its actions (touch-friendly; no hover on phones)
