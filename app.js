@@ -283,8 +283,12 @@ async function openByUsername(username) {
 
 /* ---------------- chat ---------------- */
 function teardown() {
-  if (unsubMessages) { unsubMessages(); unsubMessages = null; }
-  if (unsubInbox) { unsubInbox(); unsubInbox = null; }
+  // .on() in the compat SDK can invoke a pending callback with an undefined
+  // snapshot while detaching, so every listener body guards on the snapshot.
+  try { if (unsubMessages) unsubMessages(); } catch (e) {}
+  try { if (unsubInbox) unsubInbox(); } catch (e) {}
+  unsubMessages = null;
+  unsubInbox = null;
   editingKey = null;
   exitEditMode();
 }
@@ -335,11 +339,13 @@ async function openChat(p) {
     .orderByChild("createdAt")
     .limitToLast(200)
     .on("child_added", (s) => {
-      if (s.key === "__loading__") return;
+      if (!s || !peer) return;
       renderBubble(s.key, s.val());
     })
     .on("child_changed", (s) => {
+      if (!s || !peer) return;
       const m = s.val();
+      if (!m) return;
       const node = $("thread").querySelector(`[data-id="${s.key}"]`);
       const wasDeleted = node?.dataset.deleted === "1";
       const isDeleted = m.deleted === true;
@@ -435,17 +441,20 @@ function scrollDown() {
 }
 
 function watchInbox() {
-  unsubInbox = db.ref(`${ROOT}/conversations`).on("child_added", (snap) => {
-    snap.ref.child("meta").child(me.uid).get().then((mine) => {
-      if (!mine.exists()) return;
-      snap.ref.child("messages").orderByChild("createdAt").limitToLast(1)
+  const ref = db.ref(`${ROOT}/conversations`);
+  unsubInbox = ref.on("child_added", (snap) => {
+    if (!snap || !snap.ref || !me) return;
+    const convRef = snap.ref;
+    convRef.child("meta").child(me.uid).get().then((mine) => {
+      if (!mine || !mine.exists()) return;
+      convRef.child("messages").orderByChild("createdAt").limitToLast(1)
         .on("value", (s) => {
+          if (!s) return;
           const all = s.val();
           if (!all) return;
           const last = Object.entries(all).pop();
           if (last && last[1].senderId !== me.uid && !last[1].deleted) {
-            const preview = last[1].body.slice(0, 40);
-            toast(`📨 ${preview}`);
+            toast(`📨 ${last[1].body.slice(0, 40)}`);
           }
         });
     });
