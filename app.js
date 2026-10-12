@@ -102,6 +102,10 @@ $("auth-form").onsubmit = async (ev) => {
     err.textContent = "اسم المستخدم: حروف إنجليزية وأرقام فقط، من 2 إلى 24";
     return;
   }
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    err.textContent = "الإيميل مو صحيح";
+    return;
+  }
   if (password.length < 6) {
     err.textContent = "كلمة السر لازم 6 أحرف على الأقل";
     return;
@@ -143,15 +147,22 @@ $("logout").onclick = async () => {
 };
 
 auth.onAuthStateChanged(async (user) => {
-  if (!user) return show("auth");
+  if (!user) {
+    $("auth-error").textContent = "";
+    return show("auth");
+  }
+  const err = $("auth-error");
   try {
-    const snap = await db.ref(`${ROOT}/profiles/${user.uid}`).get();
-    me = snap.exists() ? { uid: user.uid, ...snap.val() } : null;
-    if (!me) {
-      toast("ما لقينا بروفايلك — جرّب تسجّل من جديد");
+    // onAuthStateChanged fires the moment createUserWithEmailAndPassword resolves,
+    // which is BEFORE the register handler has written the profile. Poll for it,
+    // and self-heal from auth metadata if it still is not there.
+    const profile = await ensureProfile(user);
+    if (!profile) {
+      err.textContent = "ما قدرنا نقرأ بروفايلك — أعد المحاولة";
       await auth.signOut();
       return;
     }
+    me = profile;
     $("me-name").textContent = me.displayName || me.username;
     $("me-username").textContent = me.username;
     avatarFor($("me-avatar"), me);
@@ -160,10 +171,42 @@ auth.onAuthStateChanged(async (user) => {
     const m = location.hash.match(/^#\/u\/([\w.\-]+)$/);
     if (m) openByUsername(m[1]);
   } catch (e) {
-    toast(friendly(e));
+    err.textContent = friendly(e);
     show("auth");
   }
 });
+
+async function ensureProfile(user) {
+  const ref = db.ref(`${ROOT}/profiles/${user.uid}`);
+  for (let attempt = 0; attempt < 25; attempt++) {
+    const snap = await ref.get();
+    if (snap.exists()) return { uid: user.uid, ...snap.val() };
+
+    // only start self-healing once the register handler has had time to finish
+    if (attempt === 6) {
+      const meta = user.user_metadata || {};
+      const username = (meta.username || (user.email || "").split("@")[0])
+        .toLowerCase()
+        .replace(/[^a-z0-9_.\-]/g, "")
+        .slice(0, 24);
+      if (username.length >= 2) {
+        const claimed = await db
+          .ref(`${ROOT}/usernames/${username}`)
+          .transaction((cur) => (cur === null ? user.uid : undefined));
+        if (claimed.committed) {
+          await ref.set({
+            username,
+            displayName: meta.displayName || username,
+            avatarUrl: "",
+            createdAt: Date.now(),
+          });
+        }
+      }
+    }
+    await new Promise((r) => setTimeout(r, 400));
+  }
+  return null;
+}
 
 /* ---------------- search ---------------- */
 let searchT;
