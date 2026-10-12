@@ -334,31 +334,39 @@ async function openChat(p) {
     scrollDown();
   } catch (e) { toast(friendly(e)); }
 
-  unsubMessages = db
-    .ref(`${ROOT}/conversations/${key}/messages`)
+  // .on() returns an unsubscribe function (not the Query) in the compat SDK,
+  // so the two listeners must be attached separately and detached together.
+  const q = db.ref(`${ROOT}/conversations/${key}/messages`)
     .orderByChild("createdAt")
-    .limitToLast(200)
-    .on("child_added", (s) => {
-      if (!s || !peer) return;
-      renderBubble(s.key, s.val());
-    })
-    .on("child_changed", (s) => {
-      if (!s || !peer) return;
-      const m = s.val();
-      if (!m) return;
-      const node = $("thread").querySelector(`[data-id="${s.key}"]`);
-      const wasDeleted = node?.dataset.deleted === "1";
-      const isDeleted = m.deleted === true;
+    .limitToLast(200);
 
-      if (isDeleted && !wasDeleted) {
-        toast("🗑 تم حذف رسالة");
-        renderBubble(s.key, m);
-      } else if (wasDeleted && !isDeleted) {
-        renderBubble(s.key, m);
-      } else {
-        updateBubbleText(s.key, m);
-      }
-    });
+  const offAdded = q.on("child_added", (s) => {
+    if (!s || !peer) return;
+    renderBubble(s.key, s.val());
+  });
+
+  const offChanged = q.on("child_changed", (s) => {
+    if (!s || !peer) return;
+    const m = s.val();
+    if (!m) return;
+    const node = $("thread").querySelector(`[data-id="${s.key}"]`);
+    const wasDeleted = node?.dataset.deleted === "1";
+    const isDeleted = m.deleted === true;
+
+    if (isDeleted && !wasDeleted) {
+      toast("🗑 تم حذف رسالة");
+      renderBubble(s.key, m);
+    } else if (wasDeleted && !isDeleted) {
+      renderBubble(s.key, m);
+    } else {
+      updateBubbleText(s.key, m);
+    }
+  });
+
+  unsubMessages = () => {
+    try { offAdded(); } catch (e) {}
+    try { offChanged(); } catch (e) {}
+  };
 }
 
 /* --------- rendering --------- */
